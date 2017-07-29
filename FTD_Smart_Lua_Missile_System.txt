@@ -1,6 +1,6 @@
 --FTD Smart Missile Guidance System
 --Author: 6dwavenminer
---Version: 1.3.1
+--Version: 1.4.0
 
 
 --User Config Variables
@@ -11,7 +11,6 @@ WeaponID = 0;
 MaxDistanceBetweenLuaTranscieverAndMissileControl = 10; --The maximum distnace between a lua transciever and its corrisponding missile control block.
 
 --Missile variables
-IsATorpedo = false; --'false' priotities going to target positions from below, 'true' priotities going to target positions from above.
 TargetDetonationRange = -10; --If the distance between target and missile is below this value, blow up.
 
 --Target acquisition variables
@@ -22,10 +21,16 @@ MinTargetHeight = -20; --Targets below this range will be ignored.
 --Safe detonation variables
 SafeDetonteAltitude = 500; --If there are no target, goto and detonte at this altitude.
 
+--Missile boost variables
+BaseMissileThrust = 600; --Base thrust for missile.
+MissileThrustTargetSpeedMultiplier = 10.0; --Value is multiplied by target's speed then added to base thrust of missile, useful for fast targets.
+BoostIntecpetionTime = 7.0;	--When the intercept time falls below this value,'BoostThrust' is added to missile thrust, useful for Thumpers.
+BoostThrust = 8000; --Value added to missile thrust once within boost range.
+
 --Cruising variables
 BaseDirectEngagementGroundRange = 240; --Below this ground range to target, head directly to target.
-DirectEngagementGroundRangeSpeedMultipler = 0.4; --Added onto the engagment range after it has been multiplied by the target speed, used for fast targets.
-CruisingAltitude = 180; --While en route travel at this altitude.
+DirectEngagementGroundRangeSpeedMultipler = 0.6; --Added onto the engagment range after it has been multiplied by the target speed, used for fast targets.
+CruisingAltitude = 250; --While en route travel at this altitude.
 CruisingAltitudeAboveTerrain = 30; --If terrain nears cruising altitude, travel this heigh above the terrain.
 MaxAllowedCruisingAltitude = 10000; --Missile will try and aviod going above this altitude
 MinAllowedCruisingAltitude = 10; --Missile will try and aviod going below this altitude
@@ -44,6 +49,7 @@ MissileVelocityArray = {};
 PreviousTimeForMissiles = 0;
 UseableLuaTransceiverList = {};
 UseableLuaTransceiverCount = 0;
+TickCount = 0;
 
 function GetUseableLuaTranscivers(I)
  local MissileLauncherPos = I:GetWeaponInfo(WeaponID).GlobalPosition;
@@ -118,7 +124,7 @@ function NoTargetSafelyDetonte(I)
    AimPoint = Vector3(MissilePos.x,SafeDetonteAltitude + 10,MissilePos.z);
    AimPoint = AllyCollisionAviodance(I,MissileSpeed,MissilePos,AimPoint);
    I:SetLuaControlledMissileAimPoint(t,m,AimPoint.x, AimPoint.y, AimPoint.z);
-   if ((MissilePos.y > SafeDetonteAltitude) and (IsATorpedo == false)) or ((MissilePos.y < SafeDetonteAltitude) and (IsATorpedo == true)) then
+   if ((MissilePos.y > SafeDetonteAltitude) and (SafeDetonteAltitude > 0)) or ((MissilePos.y < SafeDetonteAltitude) and (SafeDetonteAltitude <= 0)) then
     I:DetonateLuaControlledMissile(t,m);
    end
   end
@@ -241,23 +247,55 @@ end
 
 --En route go to attlitude till near target
 function TravelTowardsTarget(I,MissileHeightAboveTerrain,MissilePos,TargetPos)
- local CruisingHeight = CruisingAltitude;
- if MissileHeightAboveTerrain > CruisingAltitude - 20 then
-  CruisingHeight = MissileHeightAboveTerrain + CruisingAltitudeAboveTerrain;
- end
- if ((MissilePos.y < CruisingHeight) and (IsATorpedo == false)) or ((MissilePos.y > CruisingHeight) and (IsATorpedo == true)) then
-  --Get to the correct height
-  AimPoint = Vector3(MissilePos.x, CruisingHeight+1, MissilePos.z);
- else
-  --Now head to target
-  AimPoint = Vector3(TargetPos.x, CruisingHeight, TargetPos.z);
- end 
- return AimPoint;
+	local CruisingHeight = CruisingAltitude;
+	if MissileHeightAboveTerrain > CruisingAltitude - 20 then
+		CruisingHeight = MissileHeightAboveTerrain + CruisingAltitudeAboveTerrain;
+	end
+	--Now head to target
+	local GroundDistanceToTarget = CalculateGroundDistanceToTarget(I,MissilePos,TargetPos);		if GroundDistanceToTarget < BaseMissileThrust / 15 then
+		AimPoint = Vector3(TargetPos.x, CruisingHeight, TargetPos.z);
+	else
+		--Correct overshooting of height
+		local CoOrdinateMultiplier = (BaseMissileThrust / 15) / GroundDistanceToTarget;
+		local Missle_TargetDifferentialPosX = MissilePos.x - TargetPos.x;
+		local Missle_TargetDifferentialPosZ = MissilePos.z - TargetPos.z;
+		AimPoint = Vector3(MissilePos.x - (Missle_TargetDifferentialPosX * CoOrdinateMultiplier), CruisingHeight, MissilePos.z - (Missle_TargetDifferentialPosZ * CoOrdinateMultiplier));
+	end
+	return AimPoint;
 end
 
-function PredictInterceptPosition(I,MissilePos,TargetPos,MissileSpeed,MissileAcceleration,TargetSpeed,TargetVelocity,TargetAcceleration)
+
+--Changes the missile thrust every 20 ticks
+function SetMissileThrust(I,t,m,Thrust)
+	if TickCount < 20 then
+		TickCount = TickCount + 1;
+	else
+		TickCount = 0;
+		local Missile = I:GetLuaControlledMissileInfo(t, m);
+		if Missile.Valid == true then
+			local MissileInfo = I:GetMissileInfo(t,m);--Lagfest
+			if (MissileInfo ~= nil) then
+				for i,part in pairs(MissileInfo.Parts) do
+					if (string.find(part.Name, 'variable')) then
+						MissileInfo.Parts[i]:SendRegister(2, Thrust);
+					end
+				end
+			end
+		end
+	end
+end
+
+function ControlMissileThrust(I,t,m,IntecpetionTime,TargetSpeed)
+	local MissileThrust = BaseMissileThrust + (TargetSpeed * MissileThrustTargetSpeedMultiplier);
+	if IntecpetionTime < BoostIntecpetionTime then
+		MissileThrust = MissileThrust + BoostThrust;
+	end
+	SetMissileThrust(I,t,m,MissileThrust);
+end
+
+
+function PredictInterceptPosition(I,t,m,MissilePos,TargetPos,MissileSpeed,MissileAcceleration,TargetSpeed,TargetVelocity,TargetAcceleration,IntecpetionTime)
  local IntecpetionRange;
- local IntecpetionTime;
  local InterceptionAimPos;
  local Range = Vector3.Distance(MissilePos,TargetPos);
  local MinInterceptionTime = Range / (MissileSpeed + TargetSpeed);
@@ -267,8 +305,9 @@ function PredictInterceptPosition(I,MissilePos,TargetPos,MissileSpeed,MissileAcc
   IntecpetionTime = IntecpetionRange / MissileSpeed;
   InterceptionAimPos = TargetPos + (TargetVelocity * IntecpetionTime) + ((TargetAcceleration + MissileAcceleration) * 0.5 * math.pow(IntecpetionTime,2));
  end 
+
  AimPoint = Vector3(InterceptionAimPos.x,InterceptionAimPos.y,InterceptionAimPos.z);
- return AimPoint;
+ return AimPoint,IntecpetionTime;
 end
 
 --Checks missiles curret appoximate trajectory for any possible collisions with predicted allied postions and attempts to aviod them
@@ -448,6 +487,7 @@ else
 	local MissileAcceleration = CalculateAccelerationOfMissiles(I,MissileVelocity,MissileID);
 	MissileAcceleration = Vector3(0,0,0);
     local MissileHeightAboveTerrain = I:GetTerrainAltitudeForPosition(MissilePos);
+	
 	if Vector3.Distance(MissilePos,TargetPos) < TargetDetonationRange then
 	 I:DetonateLuaControlledMissile(t,m);
 	end
@@ -458,8 +498,13 @@ else
     GroundDistanceToTarget = CalculateGroundDistanceToTarget(I,MissilePos,TargetPos);
     if GroundDistanceToTarget > BaseDirectEngagementGroundRange + (DirectEngagementGroundRangeSpeedMultipler * TargetSpeed) then
      AimPoint = TravelTowardsTarget(I,MissileHeightAboveTerrain,MissilePos,TargetPos);
+	 --Set missle thrust
+	ControlMissileThrust(I,t,m,500,TargetSpeed);
     else
-     AimPoint = PredictInterceptPosition(I,MissilePos,TargetPos,MissileSpeed,MissileAcceleration,TargetSpeed,TargetVelocity,TargetAcceleration[TargetIDList[TargetNum]]);
+	local IntecpetionTime = 0;
+     AimPoint,IntecpetionTime = unpack{PredictInterceptPosition(I,t,m,MissilePos,TargetPos,MissileSpeed,MissileAcceleration,TargetSpeed,TargetVelocity,TargetAcceleration[TargetIDList[TargetNum]])};
+	 --Set missle 
+	ControlMissileThrust(I,t,m,IntecpetionTime,TargetSpeed);
     end
 	--Check to make sure we don't blow up any allies
 	AimPoint = AllyCollisionAviodance(I,MissileSpeed,MissilePos,AimPoint);
@@ -469,3 +514,6 @@ else
   end
  end
 end
+ 
+ 
+
