@@ -1,6 +1,6 @@
 --FTD Smart Missile Guidance System
 --Author: 6dwavenminer
---Version: 1.4.0
+--Version: 2.0.0
 
 
 --User Config Variables
@@ -11,6 +11,7 @@ WeaponID = 0;
 MaxDistanceBetweenLuaTranscieverAndMissileControl = 10; --The maximum distnace between a lua transciever and its corrisponding missile control block.
 
 --Missile variables
+MissileInterceptor = false;	--Set true if using being used for missile interception
 TargetDetonationRange = -10; --If the distance between target and missile is below this value, blow up.
 
 --Target acquisition variables
@@ -22,10 +23,10 @@ MinTargetHeight = -20; --Targets below this range will be ignored.
 SafeDetonteAltitude = 500; --If there are no target, goto and detonte at this altitude.
 
 --Missile boost variables
-BaseMissileThrust = 600; --Base thrust for missile.
+BaseMissileThrust = 500; --Base thrust for missile.
 MissileThrustTargetSpeedMultiplier = 10.0; --Value is multiplied by target's speed then added to base thrust of missile, useful for fast targets.
-BoostIntecpetionTime = 7.0;	--When the intercept time falls below this value,'BoostThrust' is added to missile thrust, useful for Thumpers.
-BoostThrust = 8000; --Value added to missile thrust once within boost range.
+BoostIntecpetionTime = 6.0;	--When the intercept time falls below this value,'BoostThrust' is added to missile thrust, useful for Thumpers.
+BoostThrustMultiplier = 15; --Value multiplied to missile thrust once within boost range.
 
 --Cruising variables
 BaseDirectEngagementGroundRange = 240; --Below this ground range to target, head directly to target.
@@ -35,6 +36,11 @@ CruisingAltitudeAboveTerrain = 30; --If terrain nears cruising altitude, travel 
 MaxAllowedCruisingAltitude = 10000; --Missile will try and aviod going above this altitude
 MinAllowedCruisingAltitude = 10; --Missile will try and aviod going below this altitude
 
+--SeaDive variables
+GroundRangeToTargetToSeaDive = 200;--Below this ground range to target, start diving underwater for explosives buff.
+MaxTargetHeightForSeaDive = 5; --Max height of enemy aimpoint above the water to use seadiving on.
+AdditionalSeaDiveDepth = 5;	--Additional depth added to enemy aimpoint when seadriving.
+
 --Anti ally collsion variables
 AntiAlliedCollisionPredictionTimeLimit = 8; --Used to prevent missile-allied vessel collisions, number is seconds into the future predicted.
 AntiAlliedCollisionPredictionTimeStep = 1; --The time step in seconds used to prevent missile-allied vessel collisions.
@@ -43,477 +49,652 @@ AntiAlliedCollisionAdditionalSafetyRange = 5; --Additional range to border of al
 --End of User Config Variables
 
 --Global Variables
-TargetVelocityArray = {};
 PreviousTimeForTargets = 0;
-MissileVelocityArray = {};
 PreviousTimeForMissiles = 0;
+
 UseableLuaTransceiverList = {};
-UseableLuaTransceiverCount = 0;
+
 TickCount = 0;
 
+NumOfMissiles = 0;
+Missiles = {};
+PreviousTimeForMissiles = 0;
+
+NumOfTargets = 0;
+Targets = {};
+
 function GetUseableLuaTranscivers(I)
- local MissileLauncherPos = I:GetWeaponInfo(WeaponID).GlobalPosition;
- local t;
- UseableLuaTransceiverCount = 0;
- for t=0, I:GetLuaTransceiverCount()-1 do
-  if Vector3.Distance(MissileLauncherPos,I:GetLuaTransceiverInfo(t).Position) < MaxDistanceBetweenLuaTranscieverAndMissileControl then
-   UseableLuaTransceiverList[UseableLuaTransceiverCount] = t;
-   UseableLuaTransceiverCount = UseableLuaTransceiverCount + 1;
-  end
- end
+	local MissileLauncherPos = I:GetWeaponInfo(WeaponID).GlobalPosition;
+	local t;
+	local ValidTransceiverList = {};
+	local UseableLuaTransceiverCount = 0;
+	for t = 0, I:GetLuaTransceiverCount()-1 do
+		if Vector3.Distance(MissileLauncherPos,I:GetLuaTransceiverInfo(t).Position) < MaxDistanceBetweenLuaTranscieverAndMissileControl then
+			UseableLuaTransceiverList[UseableLuaTransceiverCount] = t;
+			UseableLuaTransceiverCount = UseableLuaTransceiverCount + 1;
+			ValidTransceiverList[t] = true;
+		end
+	end
+	for TransceiverID, Transceiver in pairs(UseableLuaTransceiverList) do
+		if (ValidTransceiverList[TransceiverID] ~= true)then
+			UseableLuaTransceiverList[TransceiverID] = nil;
+		end
+		ValidTransceiverList[TransceiverID] = false;
+	end
+	ValidTransceiverList = nil;
 end
 
 --Check that the WeaponID corrisponds to a missile launcher
 function WeaponsCheck(I)
- if I:GetWeaponInfo(WeaponID).Valid == false then
-  I:LogToHud("Invalid WeaponID, change WeaponID in LUA code"); 
- else
-  if I:GetWeaponInfo(WeaponID).WeaponType == 4 then --Turret check
-   if not I:GetWeaponInfoOnTurretOrSpinner(WeaponID, 0).WeaponType == 5 then --Weapons check, is it a missile launcher?
-    I:LogToHud("Weapon is not missile launcher, change WeaponID in LUA code, note this weapon is on a turret or spinner,further debugging maybe required"); 
-   else
-    GetUseableLuaTranscivers(I);
-   end
-  else
-   if not I:GetWeaponInfo(WeaponID).WeaponType == 5 then --Weapons check, is it a missile launcher?
-    I:LogToHud("Weapon is not missile launcher, change WeaponID in LUA code"); 
-   else
-    GetUseableLuaTranscivers(I);
-   end
-  end
- end
+	if I:GetWeaponInfo(WeaponID).Valid == false then
+		I:LogToHud("Invalid WeaponID, change WeaponID in LUA code"); 
+	else
+		if I:GetWeaponInfo(WeaponID).WeaponType == 4 then --Turret check
+			if not I:GetWeaponInfoOnTurretOrSpinner(WeaponID, 0).WeaponType == 5 then --Weapons check, is it a missile launcher?
+				I:LogToHud("Weapon is not missile launcher, change WeaponID in LUA code, note this weapon is on a turret or spinner,further debugging maybe required"); 
+			else
+				GetUseableLuaTranscivers(I);
+			end
+		else
+			if not I:GetWeaponInfo(WeaponID).WeaponType == 5 then --Weapons check, is it a missile launcher?
+				I:LogToHud("Weapon is not missile launcher, change WeaponID in LUA code"); 
+			else
+				GetUseableLuaTranscivers(I);
+			end
+		end
+	end
 end
 
 --Creates a list of all targets within range
 function GenerateTargetList(I)
- local OutputBuffer = {};
- local TargetIDList = {};
- local NumTargets = 0;
- local TargetPos;
- local TargetRange;
- local n;
- for n=0,I:GetNumberOfTargets(MainFrameID)-1 do
-  TargetPos = I:GetTargetInfo(MainFrameID,n).AimPointPosition;
-  TargetRange = Vector3.Distance(I:GetWeaponInfo(WeaponID).GlobalPosition,TargetPos);
-  if (TargetRange < MaxRange) and (TargetPos.y < MaxTargetHeight) and (TargetPos.y > MinTargetHeight) then
-   TargetIDList[NumTargets] = n;
-   NumTargets = NumTargets + 1;
-  end
- end
- OutputBuffer[0] = NumTargets;
- for n=1, NumTargets do
-  OutputBuffer[n] = TargetIDList[n -1];
- end
- return OutputBuffer;
+	local TargetPos;
+	local TargetRange;
+	local n;
+	local ValidTargetList = {};
+	NumOfTargets = 0;
+	for n=0,I:GetNumberOfTargets(MainFrameID)-1 do
+		TargetPos = I:GetTargetInfo(MainFrameID,n).AimPointPosition;
+		TargetRange = Vector3.Distance(I:GetWeaponInfo(WeaponID).GlobalPosition,TargetPos);
+		if (TargetRange < MaxRange) and (TargetPos.y < MaxTargetHeight) and (TargetPos.y > MinTargetHeight) then
+			local TargetInfo = I:GetTargetInfo(MainFrameID,n);
+			if TargetInfo.Valid == true then
+				local TargetID = TargetInfo.Id;		
+				--If we've not seen the target before, collect data on it
+				if Targets[TargetID] == nil then
+					Targets[TargetID] = {};
+					Targets[TargetID].Index = n;
+					Targets[TargetID].Velocity = TargetInfo.Velocity;
+					Targets[TargetID].Acceleration = Vector3(0,0,0);
+				end
+				--Update target values
+				Targets[TargetID].Score = TargetInfo.Score;
+				Targets[TargetID].Position = TargetInfo.AimPointPosition;
+				Targets[TargetID].PreviousVelocity = Targets[TargetID].Velocity;
+				Targets[TargetID].Velocity = TargetInfo.Velocity;
+				ValidTargetList[TargetID] = true;	
+			
+				local TimeDifference = I:GetTime() - PreviousTimeForTargets;
+				if TimeDifference > 0.5 then
+					Targets[TargetID].Acceleration = (Targets[TargetID].Velocity - Targets[TargetID].PreviousVelocity) / TimeDifference;
+					PreviousTimeForTargets = I:GetTime();
+				end
+			
+				NumOfTargets = NumOfTargets + 1;
+			end
+		end
+	end
+	--Cycle through all known missiles to remove the dead ones
+	for TargetID, Target in pairs(Targets) do
+		if (ValidTargetList[TargetID] ~= true)then
+			Targets[TargetID] = nil;
+		end
+	end
+	ValidTargetList = nil;
 end
+
+
+--Creates a list of all targets within range
+function GenerateTargetListMissileInterceptor(I)
+	local TargetPos;
+	local TargetRange;
+	local n;
+	local ValidTargetList = {};
+	NumOfTargets = 0;
+	for n=0,I:GetNumberOfWarnings(MainFrameID)-1 do
+		TargetPos = I:GetMissileWarning(MainFrameID,n).Position;
+		TargetRange = Vector3.Distance(I:GetWeaponInfo(WeaponID).GlobalPosition,TargetPos);
+		if (TargetRange < MaxRange) and (TargetPos.y < MaxTargetHeight) and (TargetPos.y > MinTargetHeight) then
+			local TargetInfo = I:GetMissileWarning(MainFrameID,n);
+			if TargetInfo.Valid == true then
+				local TargetID = TargetInfo.Id;		
+				--If we've not seen the target before, collect data on it
+				if Targets[TargetID] == nil then
+					Targets[TargetID] = {};
+					Targets[TargetID].Index = n;
+					Targets[TargetID].Velocity = TargetInfo.Velocity;
+					Targets[TargetID].Acceleration = Vector3(0,0,0);
+				end
+				--Update target values
+				Targets[TargetID].Score = 100 / (Vector3.Distance(TargetInfo.Position, I:GetConstructPosition()) + 1); --Missiles closer to construct get a higher score
+				Targets[TargetID].Position = TargetInfo.Position;
+				Targets[TargetID].PreviousVelocity = Targets[TargetID].Velocity;
+				Targets[TargetID].Velocity = TargetInfo.Velocity;
+				ValidTargetList[TargetID] = true;	
+			
+				local TimeDifference = I:GetTime() - PreviousTimeForTargets;
+				if TimeDifference > 0.5 then
+					Targets[TargetID].Acceleration = (Targets[TargetID].Velocity - Targets[TargetID].PreviousVelocity) / TimeDifference;
+					PreviousTimeForTargets = I:GetTime();
+				end
+			
+				NumOfTargets = NumOfTargets + 1;
+			end
+		end
+	end
+	--Cycle through all known missiles to remove the dead ones
+	for TargetID, Target in pairs(Targets) do
+		if (ValidTargetList[TargetID] ~= true)then
+			Targets[TargetID] = nil;
+		end
+	end
+	ValidTargetList = nil;
+end
+
+
+--Creates a list of all useable missiles
+function GenerateMissileList(I)
+	NumOfMissiles = 0;
+	local ValidMissileList = {};
+	local i;
+	local m;
+	for TransceiverID, Transceiver in pairs( UseableLuaTransceiverList) do
+		for m=0, I:GetLuaControlledMissileCount(Transceiver)-1 do
+			local MissileInfo = I:GetLuaControlledMissileInfo(Transceiver,m);
+			if MissileInfo.Valid == true then
+				local MissileID = MissileInfo.Id;
+			
+				--If we've not seen the missile before, collect data on it
+				if Missiles[MissileID] == nil then		
+					Missiles[MissileID] = {};
+					Missiles[MissileID].TransceiverIndex = Transceiver;
+					Missiles[MissileID].MissileIndex = m;
+					Missiles[MissileID].Velocity = MissileInfo.Velocity;
+					Missiles[MissileID].AimPoint = Vector3(0, 0, 0);
+					Missiles[MissileID].IntecpetionTime = 0;
+				
+					PreviousTimeForMissiles = I:GetTime();
+					Missiles[MissileID].Acceleration = Vector3(0,0,0);
+				
+					Missiles[MissileID].NumOfThrusters = 0;
+					local MissileExtraInfo = I:GetMissileInfo(Transceiver, m);--Lagfest
+					if (MissileExtraInfo ~= nil) then
+						--Find out about the variable thrusters
+						local ThrusterIndexes = {};
+						for j,part in pairs(MissileExtraInfo.Parts) do
+							if (string.find(part.Name, 'variable')) then
+								table.insert(ThrusterIndexes, j);
+								Missiles[MissileID].NumOfThrusters = Missiles[MissileID].NumOfThrusters + 1;
+							end
+						end
+						Missiles[MissileID].ThrusterIndexes = ThrusterIndexes;
+						ThrusterIndexes = nil;
+					end
+					Missiles[MissileID].Thrust = BaseMissileThrust;
+				end
+			
+				--Update missile values
+				Missiles[MissileID].Position = MissileInfo.Position;
+				Missiles[MissileID].PreviousVelocity = Missiles[MissileID].Velocity;
+				Missiles[MissileID].Velocity = MissileInfo.Velocity;
+				local TimeDifference = I:GetTime() - PreviousTimeForMissiles;
+				if TimeDifference > 0.5 then
+					Missiles[MissileID].Acceleration = (Missiles[MissileID].Velocity - Missiles[MissileID].PreviousVelocity) / TimeDifference;
+					PreviousTimeForMissiles = I:GetTime();
+				end
+			
+				ValidMissileList[MissileID] = true;
+				NumOfMissiles = NumOfMissiles + 1;
+			end
+		end
+		IncrementalListOfTargetIDs = nil;
+	end
+	--Cycle through all known missiles to remove the dead ones
+	for MissileID, Missile in pairs(Missiles) do
+		if (ValidMissileList[MissileID] ~= true)then
+			Missiles[MissileID] = nil;
+		end
+	end
+	ValidMissileList = nil;
+end
+
 
 --If theres no targets go up to safe distance to detonte the missle
 function NoTargetSafelyDetonte(I)
- local i;
- local t;
- local m;
- local Missile;
- local MissilePos;
- local MissileSpeed;
- for i=0, UseableLuaTransceiverCount-1 do
-  local t = UseableLuaTransceiverList[i];
-  for m=0, I:GetLuaControlledMissileCount(t)-1 do
-   Missile = I:GetLuaControlledMissileInfo(t,m);
-   MissilePos = Missile.Position;
-   MissileSpeed = Vector3.Magnitude(Missile.Velocity);
-   AimPoint = Vector3(MissilePos.x,SafeDetonteAltitude + 10,MissilePos.z);
-   AimPoint = AllyCollisionAviodance(I,MissileSpeed,MissilePos,AimPoint);
-   I:SetLuaControlledMissileAimPoint(t,m,AimPoint.x, AimPoint.y, AimPoint.z);
-   if ((MissilePos.y > SafeDetonteAltitude) and (SafeDetonteAltitude > 0)) or ((MissilePos.y < SafeDetonteAltitude) and (SafeDetonteAltitude <= 0)) then
-    I:DetonateLuaControlledMissile(t,m);
-   end
-  end
- end
-end
-
-function CountActiveMissiles(I)
- local NumMissiles = 0;
- local i;
- local t;
- local m;
- for i=0, UseableLuaTransceiverCount-1 do
- local t=UseableLuaTransceiverList[i];
-  for m=0, I:GetLuaControlledMissileCount(t)-1 do
-   NumMissiles = NumMissiles + 1;
-  end
- end
- return NumMissiles;
-end
-
---Calculate acceleration of active missiles
-function CalculateAccelerationOfMissiles(I,MissileVelocity,MissileID)
- local PreviousMissileVelocity = MissileVelocityArray[MissileID];
- local MissileAcceleration;
- if PreviousMissileVelocity ~= nil then
-  MissileAcceleration = (MissileVelocity - PreviousMissileVelocity) / (I:GetTime() - PreviousTimeForMissiles);
- else
-  MissileAcceleration = Vector3(0,0,0);
- end
- MissileVelocityArray[MissileID] = MissileVelocity;
- PreviousTimeForMissiles = I:GetTime() 
- return MissileAcceleration;
-end
-
-function CalculateEnemyFleetScore(I,NumTargets,TargetIDList)
- --Find lowest enemy score
- local EnemyFleetTotalScore = 0;
- local LowestScore = 100000;
- local ScoreOffset;
- local n;
- for n=0, NumTargets-1, 1 do
-  if (I:GetTargetInfo(MainFrameID,TargetIDList[n]).Score) < LowestScore then
-   LowestScore = I:GetTargetInfo(MainFrameID,TargetIDList[n]).Score;
-  end
- end
- 
- --Calculate score offset
- ScoreOffset = -100000;
- for n=0, NumTargets-1, 1 do
-  if (I:GetTargetInfo(MainFrameID,TargetIDList[n]).Score) > ScoreOffset then
-   ScoreOffset = I:GetTargetInfo(MainFrameID,TargetIDList[n]).Score;
-  end
- end
- ScoreOffset = ScoreOffset / 2;
- ScoreOffset = ScoreOffset - LowestScore;
-
- --Calculate enemy fleet score
- for n=0, NumTargets-1, 1 do
-  EnemyFleetTotalScore = EnemyFleetTotalScore + I:GetTargetInfo(MainFrameID,TargetIDList[n]).Score + ScoreOffset;
- end
- return EnemyFleetTotalScore,ScoreOffset;
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			Missile.AimPoint = Vector3(Missile.Position.x, SafeDetonteAltitude, Missile.Position.z);
+			if ((Missile.Position.y > SafeDetonteAltitude) and (SafeDetonteAltitude > 0)) or ((Missile.Position.y < SafeDetonteAltitude) and (SafeDetonteAltitude <= 0)) then
+				I:DetonateLuaControlledMissile(Missile.TransceiverIndex,Missile.MissileIndex);
+			end
+		end
+	end
 end
 
 
 --Calculate how many to missiles each target
-function CalculateMissilesPerTarget(I,NumTargets,TargetIDList,NumMissiles,EnemyFleetTotalScore,ScoreOffset)
- local MissilesPerTarget = {};
- local n;
- for n=0, NumTargets-1, 1 do
-  if NumTargets == 1 then
-   MissilesPerTarget[n] = NumMissiles;
-  else
-   MissilesPerTarget[n] = ((I:GetTargetInfo(MainFrameID,TargetIDList[n]).Score + ScoreOffset) / EnemyFleetTotalScore) * NumMissiles;
-   MissilesPerTarget[n] = math.floor(MissilesPerTarget[n] + 0.5);
-  end
- end
- return MissilesPerTarget;
+function CalculateMissilesPerTarget(I,EnemyFleetTotalScore,ScoreOffset)
+	for ID, Target in pairs(Targets) do
+		if NumOfTargets == 1 then
+			Target.MissilesPerTarget = NumOfMissiles;
+		else
+			if EnemyFleetTotalScore ~= 0 then
+				Target.MissilesPerTarget = ((Target.Score + ScoreOffset) / EnemyFleetTotalScore) * NumOfMissiles;
+			else
+				Target.MissilesPerTarget = 1;
+			end
+			Target.MissilesPerTarget = math.floor(Target.MissilesPerTarget + 0.5);
+		end
+	end
 end
 
- --Calculate acceleration of enemy targets
-function CalculateAccelerationOfTargets(I,NumTargets,TargetIDList)
- local TargetAcceleration = {};
- local Target;
- local n;
- for n=0, NumTargets-1 do
-  Target = I:GetTargetInfo(MainFrameID,TargetIDList[n]);
-  if TargetVelocityArray[TargetIDList[n]] ~= nil then
-   TargetAcceleration[n] = (Target.Velocity - TargetVelocityArray[TargetIDList[n]]) / (I:GetTime() - PreviousTimeForTargets);
-   TargetVelocityArray[TargetIDList[n]] = Target.Velocity;
-  else 
-   TargetAcceleration[n] = Vector3(0,0,0);
-  end
- end
- PreviousTimeForTargets = I:GetTime() 
- return TargetAcceleration;
+
+function CalculateEnemyFleetScore(I)
+	local EnemyFleetTotalScore = 0;
+	local LowestScore = 100000;
+	local HighestScore = -100000;
+	local ScoreOffset = 0;
+
+	--Find highest and lowest enemy scores
+	for ID, Target in pairs(Targets) do
+		if (Target.Score) < LowestScore then
+			LowestScore = Target.Score;
+		end
+		if (Target.Score) > HighestScore then
+			HighestScore = Target.Score;
+		end
+	end
+
+	--Calculate score offset
+	ScoreOffset = (HighestScore / 2) - LowestScore;
+	--Calculate enemy fleet score
+	for ID, Target in pairs(Targets) do
+		EnemyFleetTotalScore = EnemyFleetTotalScore + ScoreOffset + Target.Score;
+	end
+	CalculateMissilesPerTarget(I,EnemyFleetTotalScore,ScoreOffset);
 end
 
-function AssignTargetForMissile(I,NumTargets,TargetNum,MissileNum,MissilesPerTarget)
- --Increment MissileID
- MissileNum = MissileNum + 1;
- if MissileNum > MissilesPerTarget[TargetNum] then
-  if TargetNum < NumTargets - 1 then 
-   TargetNum = TargetNum + 1;
-   MissileNum = 0;
-  end
- end
- return TargetNum,MissileNum
+
+function AssignTargetForMissile(I)
+--Generate a incremental list of target IDs
+	local IncrementalListOfTargetIDs = {};
+	local IncrementalIndex = 0;
+	for ID, Target in pairs(Targets) do
+		if Target ~= nil then	--Check we have a target
+			IncrementalListOfTargetIDs[IncrementalIndex] = ID;
+			IncrementalIndex = IncrementalIndex + 1;
+		end
+	end
+
+	--Cycle through every missile and assign it a target
+	local MissileNum = 0;
+	local TargetNum = 0;
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			MissileNum = MissileNum + 1;
+			if MissileNum > Targets[IncrementalListOfTargetIDs[TargetNum]].MissilesPerTarget then
+				if TargetNum < NumOfTargets - 1 then 
+					TargetNum = TargetNum + 1;
+					MissileNum = 0;
+				end
+			end
+			Missile.TargetID = IncrementalListOfTargetIDs[TargetNum];
+		end
+	end
+	IncrementalListOfTargetIDs = nil;-- Causes one missile to divert + weirdness.
 end
+
 
 --Calculate distance ignoring vertical component
-function CalculateGroundDistanceToTarget(I,MissilePos,TargetPos)
-  local GroundDistanceToTarget;
-  local TwoDMissilePos = MissilePos * 1; --Multiply by one to only copy the data, not the reference!
-  local TwoDTargetPos = TargetPos * 1; --Multiply by one to only copy the data, not the reference!
-  TwoDMissilePos.y = 0;
-  TwoDTargetPos.y = 0;
-  GroundDistanceToTarget = Vector3.Distance(TwoDMissilePos,TwoDTargetPos);
-  return GroundDistanceToTarget;
+function CalculateGroundDistanceToTarget(I, MissileID)
+	local GroundDistanceToTarget = 1000;
+	if Missiles[MissileID] ~= nil then
+		if I:GetLuaControlledMissileInfo(Missiles[MissileID].TransceiverIndex, Missiles[MissileID].MissileIndex).Valid == true then	--Double check the missile is still live
+			if Targets[Missiles[MissileID].TargetID] ~= nil then
+				local TwoDMissilePos = Missiles[MissileID].Position * 1; --Multiply by one to only copy the data, not the reference!
+				local TwoDTargetPos = Targets[Missiles[MissileID].TargetID].Position * 1; --Multiply by one to only copy the data, not the reference!
+				TwoDMissilePos.y = 0;
+				TwoDTargetPos.y = 0;
+				GroundDistanceToTarget = Vector3.Distance(TwoDMissilePos,TwoDTargetPos);
+			end
+		end
+	end
+	return GroundDistanceToTarget;
+end
+
+
+function PredictInterceptPosition(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			if Targets[Missile.TargetID] ~= nil then	--Check we have a target
+				local TargetPosition = Targets[Missile.TargetID].Position;
+				local TargetVelocity = Targets[Missile.TargetID].Velocity;
+				local TargetSpeed = Vector3.Magnitude(TargetVelocity);
+				local TargetAcceleration = Targets[Missile.TargetID].Acceleration;
+			
+				local MissilePosition = Missile.Position;
+				local MissileSpeed = Vector3.Magnitude(Missile.Velocity);
+				local MissileAcceleration = Missile.Acceleration;
+			
+				local SummedSpeedAcceleration = Vector3.Magnitude(MissileAcceleration + TargetAcceleration);
+				local SummedSpeed = MissileSpeed + TargetSpeed;
+				local IntecpetionRange;
+				local InterceptionTime;
+				local InterceptionAimPos = TargetPosition;
+				for i=0, 12 do
+					IntecpetionRange = Vector3.Distance(MissilePosition, InterceptionAimPos);
+					if SummedSpeedAcceleration ~= 0 then
+						InterceptionTime = (-SummedSpeed + math.sqrt(math.abs(math.pow(SummedSpeed, 2) + (2 * SummedSpeedAcceleration * IntecpetionRange)))) / SummedSpeedAcceleration;
+					elseif SummedSpeed ~= 0 then
+						InterceptionTime = IntecpetionRange / SummedSpeed;
+					else
+						InterceptionTime = 60;
+					end
+					--Sanity check IntecpetionTime
+					if InterceptionTime > 60 then
+						InterceptionTime = 60;
+					end
+					InterceptionAimPos = TargetPosition + (TargetVelocity * InterceptionTime) + (TargetAcceleration * 0.5 * math.pow(InterceptionTime,2));
+				end
+				Missile.IntecpetionTime = InterceptionTime;
+				Missile.AimPoint = Vector3(InterceptionAimPos.x,InterceptionAimPos.y,InterceptionAimPos.z);
+
+			end
+		end
+	end
+end
+
+--To allow quick change in height, use a closer aimpoint than target, but still in the same direction.
+function TargetCloserThanTarget(I, MissileID, GroundDistanceToTarget)
+	if I:GetLuaControlledMissileInfo(Missiles[MissileID].TransceiverIndex, Missiles[MissileID].MissileIndex).Valid == true then	--Double check the missile is still live
+		if Targets[Missiles[MissileID].TargetID] ~= nil then
+			if GroundDistanceToTarget ~= 0 then
+				local CoordinateMultiplier = (Vector3.Magnitude(Missiles[MissileID].Velocity) * 2) / GroundDistanceToTarget;
+				local Missle_TargetDifferentialPosX =  Missiles[MissileID].Position.x - Missiles[MissileID].AimPoint.x;
+				local Missle_TargetDifferentialPosZ =  Missiles[MissileID].Position.z - Missiles[MissileID].AimPoint.z;
+				Missiles[MissileID].AimPoint.x = Missiles[MissileID].Position.x - (Missle_TargetDifferentialPosX * CoordinateMultiplier);
+				Missiles[MissileID].AimPoint.z = Missiles[MissileID].Position.z - (Missle_TargetDifferentialPosZ * CoordinateMultiplier);
+			end
+		end
+	end
 end
 
 --En route go to attlitude till near target
-function TravelTowardsTarget(I,MissileHeightAboveTerrain,MissilePos,TargetPos)
-	local CruisingHeight = CruisingAltitude;
-	if MissileHeightAboveTerrain > CruisingAltitude - 20 then
-		CruisingHeight = MissileHeightAboveTerrain + CruisingAltitudeAboveTerrain;
-	end
-	--Now head to target
-	local GroundDistanceToTarget = CalculateGroundDistanceToTarget(I,MissilePos,TargetPos);		if GroundDistanceToTarget < BaseMissileThrust / 15 then
-		AimPoint = Vector3(TargetPos.x, CruisingHeight, TargetPos.z);
-	else
-		--Correct overshooting of height
-		local CoOrdinateMultiplier = (BaseMissileThrust / 15) / GroundDistanceToTarget;
-		local Missle_TargetDifferentialPosX = MissilePos.x - TargetPos.x;
-		local Missle_TargetDifferentialPosZ = MissilePos.z - TargetPos.z;
-		AimPoint = Vector3(MissilePos.x - (Missle_TargetDifferentialPosX * CoOrdinateMultiplier), CruisingHeight, MissilePos.z - (Missle_TargetDifferentialPosZ * CoOrdinateMultiplier));
-	end
-	return AimPoint;
-end
-
-
---Changes the missile thrust every 20 ticks
-function SetMissileThrust(I,t,m,Thrust)
-	if TickCount < 20 then
-		TickCount = TickCount + 1;
-	else
-		TickCount = 0;
-		local Missile = I:GetLuaControlledMissileInfo(t, m);
-		if Missile.Valid == true then
-			local MissileInfo = I:GetMissileInfo(t,m);--Lagfest
-			if (MissileInfo ~= nil) then
-				for i,part in pairs(MissileInfo.Parts) do
-					if (string.find(part.Name, 'variable')) then
-						MissileInfo.Parts[i]:SendRegister(2, Thrust);
-					end
+function CruiseTowardsTarget(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if Missile ~= nil then
+			if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+				if Targets[Missile.TargetID] ~= nil then
+					local GroundDistanceToTarget = CalculateGroundDistanceToTarget(I, MissileID);
+				
+					local MissileFuturePosition = Missile.Position + (Missile.Velocity * 2);
+					local MissileFutureTerrainHeight = I:GetTerrainAltitudeForPosition(MissileFuturePosition);
+					--Ground avoidance till near target
+					if (GroundDistanceToTarget > 50 + (2 * Vector3.Magnitude(Targets[Missile.TargetID].Velocity))) and (MissileFutureTerrainHeight + CruisingAltitudeAboveTerrain > MissileFuturePosition.y) then
+						Missile.AimPoint.y = MissileFutureTerrainHeight + CruisingAltitudeAboveTerrain;
+						TargetCloserThanTarget(I, MissileID, GroundDistanceToTarget);
+				
+					--Goto crusing height till near target
+					elseif GroundDistanceToTarget > BaseDirectEngagementGroundRange + (DirectEngagementGroundRangeSpeedMultipler * Vector3.Magnitude(Targets[Missile.TargetID].Velocity)) then
+						Missile.AimPoint.y = CruisingAltitude;
+						TargetCloserThanTarget(I, MissileID, GroundDistanceToTarget);
+					end		
+				
 				end
 			end
 		end
 	end
 end
 
-function ControlMissileThrust(I,t,m,IntecpetionTime,TargetSpeed)
-	local MissileThrust = BaseMissileThrust + (TargetSpeed * MissileThrustTargetSpeedMultiplier);
-	if IntecpetionTime < BoostIntecpetionTime then
-		MissileThrust = MissileThrust + BoostThrust;
+
+
+--If target is near the surface of the sea, dive to get explosive buff
+function MissileSeaDive(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			if Targets[Missiles[MissileID].TargetID] ~= nil then
+				local GroundDistanceToTarget = CalculateGroundDistanceToTarget(I, MissileID);
+				if (GroundDistanceToTarget < GroundRangeToTargetToSeaDive) and (Targets[Missiles[MissileID].TargetID].Position.y < MaxTargetHeightForSeaDive) then
+					Missiles[MissileID].AimPoint.y = Targets[Missiles[MissileID].TargetID].Position.y - AdditionalSeaDiveDepth;
+				end
+			end
+		end
 	end
-	SetMissileThrust(I,t,m,MissileThrust);
 end
 
-
-function PredictInterceptPosition(I,t,m,MissilePos,TargetPos,MissileSpeed,MissileAcceleration,TargetSpeed,TargetVelocity,TargetAcceleration,IntecpetionTime)
- local IntecpetionRange;
- local InterceptionAimPos;
- local Range = Vector3.Distance(MissilePos,TargetPos);
- local MinInterceptionTime = Range / (MissileSpeed + TargetSpeed);
- local InterceptionAimPos = TargetPos + (TargetVelocity * MinInterceptionTime) + ((TargetAcceleration + MissileAcceleration) * 0.5 * math.pow(MinInterceptionTime,2));
- for i=0, 12 do
-  IntecpetionRange = Vector3.Distance(MissilePos,InterceptionAimPos);
-  IntecpetionTime = IntecpetionRange / MissileSpeed;
-  InterceptionAimPos = TargetPos + (TargetVelocity * IntecpetionTime) + ((TargetAcceleration + MissileAcceleration) * 0.5 * math.pow(IntecpetionTime,2));
- end 
-
- AimPoint = Vector3(InterceptionAimPos.x,InterceptionAimPos.y,InterceptionAimPos.z);
- return AimPoint,IntecpetionTime;
-end
 
 --Checks missiles curret appoximate trajectory for any possible collisions with predicted allied postions and attempts to aviod them
-function AllyCollisionAviodance(I,MissileSpeed,MissilePos,AimPoint)
- --Find all possible allied collsions
- local n;
- local t;
- local MissileTimeToReachAimPos;
- local MissileFuturePos;
- local FutureAllyReferencePosition;
- local FutureAllyReferencePositionPositiveSize;
- local FutureAllyReferencePositionNegativeSize;
- local PositiveAviodCoOrdinates;
- local NegativeAviodCoOrdinates;
- local MissileFutureCollisionPos;
- local PositiveEvadeDistance;
- local NegativeEvadeDistance;
- local AlliedCollsionTimeArray = {};
- local AlliedCollsionFriendlyIndexArray = {};
- local NearestTimeCollsion = AntiAlliedCollisionPredictionTimeLimit;
- local NumOfPossibleAlliedCollision = 0;
- local NumOfFriendlies = I:GetFriendlyCount();
- local FriendlyInfo;
- for n=0, NumOfFriendlies-1 do
-  FriendlyInfo = I:GetFriendlyInfo(n);
-  if FriendlyInfo.Valid == true then
-   MissileTimeToReachAimPos = Vector3.Distance(MissilePos,AimPoint) / MissileSpeed;
-   for t=0, AntiAlliedCollisionPredictionTimeLimit-1,AntiAlliedCollisionPredictionTimeStep do
-    if MissileTimeToReachAimPos > t then --Don't care is the ally is behind the enemy target
-     MissileFuturePos = MissilePos + ((AimPoint - MissilePos) / t); 
-	 FutureAllyReferencePosition = FriendlyInfo.ReferencePosition + (FriendlyInfo.Velocity * t);
-     FutureAllyReferencePositionPositiveSize = FutureAllyReferencePosition + FriendlyInfo.PositiveSize + Vector3(AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange);
-     FutureAllyReferencePositionNegativeSize = FutureAllyReferencePosition + FriendlyInfo.NegativeSize - Vector3(AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange);
-	 if  (MissileFuturePos.x <= FutureAllyReferencePositionPositiveSize.x)
-	 and (MissileFuturePos.x >= FutureAllyReferencePositionNegativeSize.x)
-	 and (MissileFuturePos.y <= FutureAllyReferencePositionPositiveSize.y)
-	 and (MissileFuturePos.y >= FutureAllyReferencePositionNegativeSize.y)
-     and (MissileFuturePos.z <= FutureAllyReferencePositionPositiveSize.z)
- 	 and (MissileFuturePos.z >= FutureAllyReferencePositionNegativeSize.z)
-	 then
-	  --Will probably collide with ally, record time and friendly Index
-	  if t < NearestTimeCollsion then
-	   NearestTimeCollsion = t;
-	  end
-	  AlliedCollsionTimeArray[0] = t;
-	  AlliedCollsionFriendlyIndexArray[0] = n;
-	  NumOfPossibleAlliedCollision = NumOfPossibleAlliedCollision + 1;
-	  break
-     end
-    end
-   end
-  end
- end
+function AllyCollisionAviodance(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			local NumOfFriendlies = I:GetFriendlyCount();
+			if NumOfFriendlies > 0 then
+				--Find all possible allied collsions 
+				local n;
+				local t;
+				local MissileTimeToReachAimPos;
+				local MissileFuturePos;
+				local FutureAllyReferencePosition;
+				local FutureAllyReferencePositionPositiveSize;
+				local FutureAllyReferencePositionNegativeSize;
+				local PositiveAviodCoOrdinates;
+				local NegativeAviodCoOrdinates;
+				local MissileFutureCollisionPos;
+				local PositiveEvadeDistance;
+				local NegativeEvadeDistance; 
+				local NearestTimeCollsion = AntiAlliedCollisionPredictionTimeLimit;
+				local NearestTimeCollsionAlliedIndex = nil;
+		
+				local FriendlyInfo;
+				for n=0, NumOfFriendlies-1 do
+					FriendlyInfo = I:GetFriendlyInfo(n);
+					if FriendlyInfo.Valid == true then
+						if Missile.Velocity.magnitude ~= 0 then
+							MissileTimeToReachAimPos = Vector3.Distance(Missile.Position, Missile.AimPoint) / Missile.Velocity.magnitude;
+						else
+							MissileTimeToReachAimPos = Vector3.Distance(Missile.Position, Missile.AimPoint) / 0.001;
+						end
+						for t=0, AntiAlliedCollisionPredictionTimeLimit-1, AntiAlliedCollisionPredictionTimeStep do
+							if MissileTimeToReachAimPos > t then --Don't care is the ally is further away than the enemy target
+								if t ~= 0 then
+									MissileFuturePos = Missile.Position + ((Missile.AimPoint - Missile.Position) / t); 
+								else
+									MissileFuturePos = Missile.Position + ((Missile.AimPoint - Missile.Position) / 0.001); 
+								end
+								FutureAllyReferencePosition = FriendlyInfo.ReferencePosition + (FriendlyInfo.Velocity * t);
+								FutureAllyReferencePositionPositiveSize = FutureAllyReferencePosition + FriendlyInfo.PositiveSize + Vector3(AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange);
+								FutureAllyReferencePositionNegativeSize = FutureAllyReferencePosition + FriendlyInfo.NegativeSize - Vector3(AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange);
+								if  (MissileFuturePos.x <= FutureAllyReferencePositionPositiveSize.x)
+								and (MissileFuturePos.x >= FutureAllyReferencePositionNegativeSize.x)
+								and (MissileFuturePos.y <= FutureAllyReferencePositionPositiveSize.y)
+								and (MissileFuturePos.y >= FutureAllyReferencePositionNegativeSize.y)
+								and (MissileFuturePos.z <= FutureAllyReferencePositionPositiveSize.z)
+								and (MissileFuturePos.z >= FutureAllyReferencePositionNegativeSize.z)
+								then
+									--Will probably collide with ally, record time and friendly Index
+									if t < NearestTimeCollsion then
+										NearestTimeCollsion = t;
+										NearestTimeCollsionAlliedIndex = FriendlyInfo.Id;
+									end
+									break	--No use checking if it will collide later with the same target...
+								end
+							end
+						end
+					end
+				end
 
- --Calculate where the missile can't go 
- PositiveAviodCoOrdinates = Vector3(-100000,100000,-100000);
- NegativeAviodCoOrdinates = Vector3(100000,100000,100000);
- for n=0, NumOfPossibleAlliedCollision-1 do
-  t = AlliedCollsionTimeArray[n];
-  if NearestTimeCollsion == t then --Only care about the nearest time possible collsions
-   FriendlyInfo = I:GetFriendlyInfo(n);
-  
-   FutureAllyReferencePosition = FriendlyInfo.ReferencePosition + (FriendlyInfo.Velocity * t);
-   FutureAllyReferencePositionPositiveSize = FutureAllyReferencePosition + FriendlyInfo.PositiveSize + Vector3(AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange);
-   FutureAllyReferencePositionNegativeSize = FutureAllyReferencePosition + FriendlyInfo.NegativeSize - Vector3(AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange,AntiAlliedCollisionAdditionalSafetyRange);
-  
-   if (PositiveAviodCoOrdinates.x <= FutureAllyReferencePositionPositiveSize.x) then
-    PositiveAviodCoOrdinates.x = FutureAllyReferencePositionPositiveSize.x;
-   end
-   if (NegativeAviodCoOrdinates.x >= FutureAllyReferencePositionPositiveSize.x) then
-    NegativeAviodCoOrdinates.x = FutureAllyReferencePositionNegativeSize.x;
-   end
-   if (PositiveAviodCoOrdinates.y <= FutureAllyReferencePositionPositiveSize.y) then
-    PositiveAviodCoOrdinates.y = FutureAllyReferencePositionPositiveSize.y;
-   end
-   if (NegativeAviodCoOrdinates.y >= FutureAllyReferencePositionPositiveSize.y) then
-    NegativeAviodCoOrdinates.y = FutureAllyReferencePositionNegativeSize.y;
-   end
-   if (PositiveAviodCoOrdinates.z <= FutureAllyReferencePositionPositiveSize.z) then
-    PositiveAviodCoOrdinates.z = FutureAllyReferencePositionPositiveSize.z;
-   end
-   if (NegativeAviodCoOrdinates.z >= FutureAllyReferencePositionPositiveSize.z) then
-    NegativeAviodCoOrdinates.z = FutureAllyReferencePositionNegativeSize.z;
-   end
-  end
- end
+				--Calculate where the missile can't go 
+				PositiveAviodCoOrdinates = Vector3(-100000,100000,-100000);
+				NegativeAviodCoOrdinates = Vector3(100000,100000,100000);
+				if NearestTimeCollsionAlliedIndex ~= nil then
+					FriendlyInfo = I:GetFriendlyInfo(NearestTimeCollsionAlliedIndex);
+	
+					FutureAllyReferencePosition = FriendlyInfo.ReferencePosition + (FriendlyInfo.Velocity * NearestTimeCollsion);
+					FutureAllyReferencePositionPositiveSize = FutureAllyReferencePosition + FriendlyInfo.PositiveSize + Vector3(AntiAlliedCollisionAdditionalSafetyRange, AntiAlliedCollisionAdditionalSafetyRange, AntiAlliedCollisionAdditionalSafetyRange);
+					FutureAllyReferencePositionNegativeSize = FutureAllyReferencePosition + FriendlyInfo.NegativeSize - Vector3(AntiAlliedCollisionAdditionalSafetyRange, AntiAlliedCollisionAdditionalSafetyRange, AntiAlliedCollisionAdditionalSafetyRange);
+	
+					if (PositiveAviodCoOrdinates.x <= FutureAllyReferencePositionPositiveSize.x) then
+						PositiveAviodCoOrdinates.x = FutureAllyReferencePositionPositiveSize.x;
+					end
+					if (NegativeAviodCoOrdinates.x >= FutureAllyReferencePositionPositiveSize.x) then
+						NegativeAviodCoOrdinates.x = FutureAllyReferencePositionNegativeSize.x;
+					end
+					if (PositiveAviodCoOrdinates.y <= FutureAllyReferencePositionPositiveSize.y) then
+						PositiveAviodCoOrdinates.y = FutureAllyReferencePositionPositiveSize.y;
+					end
+					if (NegativeAviodCoOrdinates.y >= FutureAllyReferencePositionPositiveSize.y) then
+						NegativeAviodCoOrdinates.y = FutureAllyReferencePositionNegativeSize.y;
+					end
+					if (PositiveAviodCoOrdinates.z <= FutureAllyReferencePositionPositiveSize.z) then
+						PositiveAviodCoOrdinates.z = FutureAllyReferencePositionPositiveSize.z;
+					end
+					if (NegativeAviodCoOrdinates.z >= FutureAllyReferencePositionPositiveSize.z) then
+						NegativeAviodCoOrdinates.z = FutureAllyReferencePositionNegativeSize.z;
+					end
+				end
 
- --Find the nearest non-collsion point while trying to maintain route to target
- if NumOfPossibleAlliedCollision > 0 then
-  MissileFutureCollisionPos = MissilePos + ((AimPoint - MissilePos) / NearestTimeCollsion); 
-  PositiveEvadeDistance = Vector3.Magnitude(MissileFutureCollisionPos - PositiveAviodCoOrdinates);
-  NegativeEvadeDistance = Vector3.Magnitude(MissileFutureCollisionPos - NegativeAviodCoOrdinates);
-  --Now we try and steer the missile away from the possible collisions
-  if PositiveEvadeDistance < NegativeEvadeDistance  then
-   AimPoint = PositiveAviodCoOrdinates;
-   if PositiveEvadeDistance.y > MaxAllowedCruisingAltitude then
-    AimPoint.y = MaxAllowedCruisingAltitude.y;
-   end
-  else
-   AimPoint = NegativeAviodCoOrdinates;
-   if NegativeAviodCoOrdinates.y < MinAllowedCruisingAltitude then
-    AimPoint.y = MinAllowedCruisingAltitude;
-   else
-   end
-  end
- end
- return AimPoint;
+				--Find the nearest non-collsion point while trying to maintain route to target
+				if NearestTimeCollsionAlliedIndex ~= nil then
+					if NearestTimeCollsion ~= 0 then
+						MissileFutureCollisionPos = Missile.Position + ((Missile.AimPoint - Missile.Position) / NearestTimeCollsion); 
+					else
+						MissileFutureCollisionPos = Missile.Position + ((Missile.AimPoint - Missile.Position) / 0.0001);
+					end
+					PositiveEvadeDistance = Vector3.Magnitude(MissileFutureCollisionPos - PositiveAviodCoOrdinates);
+					NegativeEvadeDistance = Vector3.Magnitude(MissileFutureCollisionPos - NegativeAviodCoOrdinates);
+					--Now we try and steer the missile away from the possible collisions
+					if PositiveEvadeDistance < NegativeEvadeDistance  then
+						Missile.AimPoint = PositiveAviodCoOrdinates;
+						if PositiveEvadeDistance.y > MaxAllowedCruisingAltitude then
+							Missile.AimPoint.y = MaxAllowedCruisingAltitude;
+						end
+					else
+						Missile.AimPoint = NegativeAviodCoOrdinates;
+						if NegativeAviodCoOrdinates.y < MinAllowedCruisingAltitude then
+							Missile.AimPoint.y = MinAllowedCruisingAltitude;
+						end
+					end
+				end
+			end
+		end
+	end
+
 end
+
+--Finally command the missiles to aim at thier aimpoints
+function AimMissiles(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if I:IsLuaControlledMissileAnInterceptor(Missile.TransceiverIndex, Missile.MissileIndex) then
+			I:SetLuaControlledMissileInterceptorStandardGuidanceOnOff(Missile.TransceiverIndex, Missile.MissileIndex, false);
+		end
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			I:SetLuaControlledMissileAimPoint(Missile.TransceiverIndex, Missile.MissileIndex, Missile.AimPoint.x, Missile.AimPoint.y, Missile.AimPoint.z);
+		end
+	end
+end
+
+
+function ControlMissileThrust(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			local TargetSpeed = 0;
+			if Targets[Missile.TargetID] ~= nil then	--Check we have a target
+				TargetSpeed = Vector3.Magnitude(Targets[Missile.TargetID].Velocity);
+			else
+				TargetSpeed = 0;
+			end
+					
+			local VectorToInterceptionAimPos = Missile.AimPoint - Missile.Position
+			local AngleToInterceptionAimPos;
+			if (VectorToInterceptionAimPos.magnitude ~= 0) and  (Missile.Velocity.magnitude ~= 0) then
+				AngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Missile.Velocity) / (VectorToInterceptionAimPos.magnitude *  Missile.Velocity.magnitude)));
+			else
+				AngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Missile.Velocity) / 0.001));
+			end
+			Missile.Thrust =  MissileThrustTargetSpeedMultiplier * TargetSpeed * (1 - (AngleToInterceptionAimPos / 180.1)) + BaseMissileThrust;
+			if Missile.IntecpetionTime < BoostIntecpetionTime then
+				Missile.Thrust = Missile.Thrust * BoostThrustMultiplier;
+			end
+			if Missile.Thrust > 10000 then	--Clamp result
+				Missile.Thrust = 10000;
+			end
+		end
+	end
+end
+
+
+--Changes the missile thrust every 100 ticks
+function SetMissileThrust(I)
+	if TickCount < 100 then
+		TickCount = TickCount + 1;
+	else
+		TickCount = 0;
+		ControlMissileThrust(I);
+		for MissileID, Missile in pairs(Missiles) do
+			if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+				local MissileExtraInfo = I:GetMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex);--Lagfest
+				if (Missile.NumOfThrusters > 0) and (MissileExtraInfo ~= nil) then
+					for i,Index in pairs(Missile.ThrusterIndexes) do
+						if (MissileExtraInfo.Parts[Index] ~= nil) and (Missile.Thrust ~= nil) then
+							MissileExtraInfo.Parts[Index]:SendRegister(2, Missile.Thrust);
+						end
+					end
+				end
+				MissileExtraInfo = nil;
+			end
+		end
+	end
+end
+
+
+function ProximityDetonation(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			if Targets[Missile.TargetID] ~= nil then
+					if Vector3.Distance(Missile.Position, Targets[Missile.TargetID].Position) < TargetDetonationRange then
+					I:DetonateLuaControlledMissile(Missile.TransceiverIndex, Missile.MissileIndex);
+				end
+			end
+		end
+	end
+end
+
 
 --Main
 function Update(I)
---Startup
-WeaponsCheck(I);
-local TargetListBuffer = {};
-local TargetIDList = {};
-local TargetListBuffer = unpack{GenerateTargetList(I)};
-local TargetAcceleration = {};
-local NumTargets = TargetListBuffer[0];
-
-local NumMissiles = 0;
-local EnemyFleetTotalScore = 0;
-local MissilesPerTarget = {};
-local ScoreOffset = 0;
-
-local MissileNum = 0;
-local MissileID = 0;
-local TargetNum = 0;
-
-local Target;
-local TargetPos;
-local TargetVelocity;
-local TargetSpeed;
-   
-local Missile;
-local MissilePos;
-local MissileVelocity;
-local MissileSpeed;
-local MissileAcceleration;
-local MissileHeightAboveTerrain;
-
---Counter variables
-local n;
-local i;
-local t;
-local m;
-
-
-if NumTargets > 0 then
- for n=0, NumTargets-1 do
-  TargetIDList[n] = TargetListBuffer[n+1];
- end 
-end      
-
-if NumTargets<=0 then
- NoTargetSafelyDetonte(I);
-else
- NumMissiles = CountActiveMissiles(I);
- EnemyFleetTotalScore,ScoreOffset = unpack{CalculateEnemyFleetScore(I,NumTargets,TargetIDList)};
- MissilesPerTarget = CalculateMissilesPerTarget(I,NumTargets,TargetIDList,NumMissiles,EnemyFleetTotalScore,ScoreOffset);
- 
- TargetAcceleration = CalculateAccelerationOfTargets(I,NumTargets,TargetIDList);
- 
-  for i=0, UseableLuaTransceiverCount-1 do
-   t=UseableLuaTransceiverList[i];
-   for m=0, I:GetLuaControlledMissileCount(t)-1 do
-    TargetNum,MissileNum = unpack{AssignTargetForMissile(I,NumTargets,TargetNum,MissileNum,MissilesPerTarget)};
-    local Target = I:GetTargetInfo(MainFrameID,TargetIDList[TargetNum]);
-    local TargetPos = Target.AimPointPosition;
-    local TargetVelocity = Target.Velocity;
-    local TargetSpeed = Vector3.Magnitude(TargetVelocity);
-   
-    local Missile = I:GetLuaControlledMissileInfo(t,m);
-    local MissilePos = Missile.Position;
-	local MissileVelocity = Missile.Velocity;
-    local MissileSpeed = Vector3.Magnitude(MissileVelocity);
-	MissileID = MissileID + 1;
-	local MissileAcceleration = CalculateAccelerationOfMissiles(I,MissileVelocity,MissileID);
-	MissileAcceleration = Vector3(0,0,0);
-    local MissileHeightAboveTerrain = I:GetTerrainAltitudeForPosition(MissilePos);
-	
-	if Vector3.Distance(MissilePos,TargetPos) < TargetDetonationRange then
-	 I:DetonateLuaControlledMissile(t,m);
+	--Startup
+	WeaponsCheck(I);
+	if MissileInterceptor == true then
+		GenerateTargetListMissileInterceptor(I);
+	else
+		GenerateTargetList(I);
 	end
+	GenerateMissileList(I);
+	--End Startup
+	if NumOfTargets <=0 then
+		NoTargetSafelyDetonte(I);	
+	else
+		CalculateEnemyFleetScore(I); --Also calculates how many missiles are to be fired at each target
+		AssignTargetForMissile(I);
 	
-    if MissileHeightAboveTerrain < 0 then 
-     MissileHeightAboveTerrain = 0;
-    end 
-    GroundDistanceToTarget = CalculateGroundDistanceToTarget(I,MissilePos,TargetPos);
-    if GroundDistanceToTarget > BaseDirectEngagementGroundRange + (DirectEngagementGroundRangeSpeedMultipler * TargetSpeed) then
-     AimPoint = TravelTowardsTarget(I,MissileHeightAboveTerrain,MissilePos,TargetPos);
-	 --Set missle thrust
-	ControlMissileThrust(I,t,m,500,TargetSpeed);
-    else
-	local IntecpetionTime = 0;
-     AimPoint,IntecpetionTime = unpack{PredictInterceptPosition(I,t,m,MissilePos,TargetPos,MissileSpeed,MissileAcceleration,TargetSpeed,TargetVelocity,TargetAcceleration[TargetIDList[TargetNum]])};
-	 --Set missle 
-	ControlMissileThrust(I,t,m,IntecpetionTime,TargetSpeed);
-    end
-	--Check to make sure we don't blow up any allies
-	AimPoint = AllyCollisionAviodance(I,MissileSpeed,MissilePos,AimPoint);
-	--Now aim at target
-	I:SetLuaControlledMissileAimPoint(t,m,AimPoint.x,AimPoint.y,AimPoint.z);
-   end
-  end
- end
+		--Guide missiles towards thier targets
+		PredictInterceptPosition(I);
+		CruiseTowardsTarget(I);	
+		MissileSeaDive(I);
+	end
+	AllyCollisionAviodance(I); --Check to make sure we don't blow up any allies
+	AimMissiles(I); --Now aim at target
+	SetMissileThrust(I);
+	ProximityDetonation(I);
+	
 end
- 
- 
 
