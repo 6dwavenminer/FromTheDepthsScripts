@@ -71,8 +71,8 @@ function GetUseableLuaTranscivers(I)
 	for t = 0, I:GetLuaTransceiverCount()-1 do
 		if Vector3.Distance(MissileLauncherPos,I:GetLuaTransceiverInfo(t).Position) < MaxDistanceBetweenLuaTranscieverAndMissileControl then
 			UseableLuaTransceiverList[UseableLuaTransceiverCount] = t;
-			UseableLuaTransceiverCount = UseableLuaTransceiverCount + 1;
 			ValidTransceiverList[UseableLuaTransceiverCount] = true;
+			UseableLuaTransceiverCount = UseableLuaTransceiverCount + 1;
 		end
 	end
 	for TransceiverID, Transceiver in pairs(UseableLuaTransceiverList) do
