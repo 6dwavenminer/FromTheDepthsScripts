@@ -1,6 +1,6 @@
 --FTD Smart Missile Guidance System
 --Author: 6dwavenminer
---Version: 2.0.0
+--Version: 2.0.1
 
 
 --User Config Variables
@@ -8,7 +8,7 @@
 --Launcher vehicle variables
 MainFrameID = 0; --Which MainFrame to connect to
 WeaponID = 0;
-MaxDistanceBetweenLuaTranscieverAndMissileControl = 10; --The maximum distnace between a lua transciever and its corrisponding missile control block.
+MaxDistanceBetweenLuaTranscieverAndMissileControl = 10; --The maximum distance between a lua transciever and its corrisponding missile control block.
 
 --Missile variables
 MissileInterceptor = false;	--Set true if using being used for missile interception
@@ -72,7 +72,7 @@ function GetUseableLuaTranscivers(I)
 		if Vector3.Distance(MissileLauncherPos,I:GetLuaTransceiverInfo(t).Position) < MaxDistanceBetweenLuaTranscieverAndMissileControl then
 			UseableLuaTransceiverList[UseableLuaTransceiverCount] = t;
 			UseableLuaTransceiverCount = UseableLuaTransceiverCount + 1;
-			ValidTransceiverList[t] = true;
+			ValidTransceiverList[UseableLuaTransceiverCount] = true;
 		end
 	end
 	for TransceiverID, Transceiver in pairs(UseableLuaTransceiverList) do
