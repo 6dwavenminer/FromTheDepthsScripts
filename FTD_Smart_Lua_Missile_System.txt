@@ -1,6 +1,6 @@
 --FTD Smart Missile Guidance System
 --Author: 6dwavenminer
---Version: 2.0.1
+--Version: 2.1.0
 
 
 --User Config Variables
@@ -21,12 +21,20 @@ MinTargetHeight = -20; --Targets below this range will be ignored.
 
 --Safe detonation variables
 SafeDetonteAltitude = 500; --If there are no target, goto and detonte at this altitude.
+DetonateMissileUponEmptyFuel = true; --If the missile has run out of fuel, detonate?
 
 --Missile boost variables
-BaseMissileThrust = 500; --Base thrust for missile.
-MissileThrustTargetSpeedMultiplier = 10.0; --Value is multiplied by target's speed then added to base thrust of missile, useful for fast targets.
-BoostIntecpetionTime = 6.0;	--When the intercept time falls below this value,'BoostThrust' is added to missile thrust, useful for Thumpers.
-BoostThrustMultiplier = 15; --Value multiplied to missile thrust once within boost range.
+UseFuelDefinedThrustControl = true;
+--If true: Uses the predicted time to intercept and the amount of remaining fuel to calculate thrust value. More adaptable to different ranges.
+--If false: Uses the 'BaseMissileThrust' added to the target speed multiplied by 'MissileThrustTargetSpeedMultiplier' to calculate thrust.
+--In both: If target is below 'BoostInterceptionTime' then thrust is multiplied by 'BoostThrustMultiplier'
+BaseMissileThrust = 300; --Base thrust for missile.
+MissileThrustTargetSpeedMultiplier = 10.0; --Value is multiplied by target's speed then added to base thrust of missile, useful for fast targets. Not used is UseFuelDefinedThrustControl = true.
+BoostInterceptionTime = 6.0;	--When the intercept time falls below this value,'BoostThrust' is added to missile thrust, useful for Thumpers.
+BoostThrustMultiplier = 1.2; --Value multiplied to missile thrust once within boost range.
+
+--Check angle to intercept variables
+InterceptionTurnAngleTollerance = 5; --Added tollerance when calculating whether to steer away from target as interception is deemed currently impossible due to too steep an angle.
 
 --Cruising variables
 BaseDirectEngagementGroundRange = 240; --Below this ground range to target, head directly to target.
@@ -54,7 +62,7 @@ PreviousTimeForMissiles = 0;
 
 UseableLuaTransceiverList = {};
 
-TickCount = 0;
+UpdateThrust = true;
 
 NumOfMissiles = 0;
 Missiles = {};
@@ -131,10 +139,11 @@ function GenerateTargetList(I)
 				Targets[TargetID].Position = TargetInfo.AimPointPosition;
 				Targets[TargetID].PreviousVelocity = Targets[TargetID].Velocity;
 				Targets[TargetID].Velocity = TargetInfo.Velocity;
+				Targets[TargetID].Speed = TargetInfo.Velocity.magnitude;
 				ValidTargetList[TargetID] = true;	
 			
 				local TimeDifference = I:GetTime() - PreviousTimeForTargets;
-				if TimeDifference > 0.5 then
+				if TimeDifference > 0.1 then
 					Targets[TargetID].Acceleration = (Targets[TargetID].Velocity - Targets[TargetID].PreviousVelocity) / TimeDifference;
 					PreviousTimeForTargets = I:GetTime();
 				end
@@ -175,10 +184,21 @@ function GenerateTargetListMissileInterceptor(I)
 					Targets[TargetID].Acceleration = Vector3(0,0,0);
 				end
 				--Update target values
-				Targets[TargetID].Score = 100 / (Vector3.Distance(TargetInfo.Position, I:GetConstructPosition()) + 1); --Missiles closer to construct get a higher score
 				Targets[TargetID].Position = TargetInfo.Position;
 				Targets[TargetID].PreviousVelocity = Targets[TargetID].Velocity;
 				Targets[TargetID].Velocity = TargetInfo.Velocity;
+				Targets[TargetID].Speed = TargetInfo.Velocity.magnitude;
+				
+				
+				local VectorToInterceptionAimPos = I:GetConstructPosition() - Targets[TargetID].Position;
+				local TargetAngleToInterceptionAimPos;
+				if (VectorToInterceptionAimPos.magnitude ~= 0) and  (Targets[TargetID].Speed ~= 0) then
+					TargetAngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Targets[TargetID].Velocity) / (VectorToInterceptionAimPos.magnitude *  Targets[TargetID].Speed)));
+				else
+					TargetAngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Targets[TargetID].Velocity) / 0.001));
+				end
+				
+				Targets[TargetID].Score = (100 / (Vector3.Distance(TargetInfo.Position, I:GetConstructPosition()) + 1)) * (1 - (TargetAngleToInterceptionAimPos / 180.1)); --Missiles closer to construct, and that are also pointing towards it, get a higher score
 				ValidTargetList[TargetID] = true;	
 			
 				local TimeDifference = I:GetTime() - PreviousTimeForTargets;
@@ -201,6 +221,7 @@ function GenerateTargetListMissileInterceptor(I)
 end
 
 
+
 --Creates a list of all useable missiles
 function GenerateMissileList(I)
 	NumOfMissiles = 0;
@@ -220,12 +241,22 @@ function GenerateMissileList(I)
 					Missiles[MissileID].MissileIndex = m;
 					Missiles[MissileID].Velocity = MissileInfo.Velocity;
 					Missiles[MissileID].AimPoint = Vector3(0, 0, 0);
-					Missiles[MissileID].IntecpetionTime = 0;
+					Missiles[MissileID].InterceptionTime = 0;
 				
 					PreviousTimeForMissiles = I:GetTime();
 					Missiles[MissileID].Acceleration = Vector3(0,0,0);
 				
 					Missiles[MissileID].NumOfThrusters = 0;
+					Missiles[MissileID].NumOfTorpedoPropellers = 0;
+					Missiles[MissileID].NumOfShortRangeThrusters = 0;
+					Missiles[MissileID].NumOfFins = 0;
+					Missiles[MissileID].NumOfRegulators = 0;
+					Missiles[MissileID].Fuel = 0;
+					Missiles[MissileID].AngleToInterceptionAimPos = 0;
+					Missiles[MissileID].MaxTurnSpeed = 0;
+					Missiles[MissileID].MinimumTurnRadius = 1;
+					Missiles[MissileID].FlightTimeLeft = 60;
+					Missiles[MissileID].MissileLength = 0;
 					local MissileExtraInfo = I:GetMissileInfo(Transceiver, m);--Lagfest
 					if (MissileExtraInfo ~= nil) then
 						--Find out about the variable thrusters
@@ -235,6 +266,25 @@ function GenerateMissileList(I)
 								table.insert(ThrusterIndexes, j);
 								Missiles[MissileID].NumOfThrusters = Missiles[MissileID].NumOfThrusters + 1;
 							end
+							if (string.find(part.Name, 'short')) then
+								Missiles[MissileID].NumOfShortRangeThrusters = Missiles[MissileID].NumOfShortRangeThrusters + 1;
+							end
+							if (string.find(part.Name, 'propeller')) then
+								Missiles[MissileID].NumOfTorpedoPropellers = Missiles[MissileID].NumOfTorpedoPropellers + 1;
+							end
+							if (string.find(part.Name, 'fuel')) then
+								Missiles[MissileID].Fuel = Missiles[MissileID].Fuel + 5000;
+							end
+							if (string.find(part.Name, 'fins')) then
+								Missiles[MissileID].NumOfFins = Missiles[MissileID].NumOfFins + 1;
+							end
+							if (string.find(part.Name, 'regulator')) then
+								Missiles[MissileID].NumOfRegulators = Missiles[MissileID].NumOfRegulators + 1;
+							end
+							if (string.find(part.Name, 'thumper')) then
+								Missiles[MissileID].MissileLength = Missiles[MissileID].MissileLength + 1;
+							end
+							Missiles[MissileID].MissileLength = Missiles[MissileID].MissileLength + 0.5;
 						end
 						Missiles[MissileID].ThrusterIndexes = ThrusterIndexes;
 						ThrusterIndexes = nil;
@@ -243,13 +293,46 @@ function GenerateMissileList(I)
 				end
 			
 				--Update missile values
+				Missiles[MissileID].TimeSinceLaunch = MissileInfo.TimeSinceLaunch;
+				Missiles[MissileID].TimeLeftTillDespawn = 60 + (Missiles[MissileID].NumOfRegulators * 180) - Missiles[MissileID].TimeSinceLaunch; --Time left before despawn
 				Missiles[MissileID].Position = MissileInfo.Position;
 				Missiles[MissileID].PreviousVelocity = Missiles[MissileID].Velocity;
 				Missiles[MissileID].Velocity = MissileInfo.Velocity;
+				Missiles[MissileID].Speed = MissileInfo.Velocity.magnitude;
 				local TimeDifference = I:GetTime() - PreviousTimeForMissiles;
-				if TimeDifference > 0.5 then
+				if TimeDifference > 0.25 then
+					UpdateThrust = true;
 					Missiles[MissileID].Acceleration = (Missiles[MissileID].Velocity - Missiles[MissileID].PreviousVelocity) / TimeDifference;
+					if Missiles[MissileID].Fuel > 0 then
+						Missiles[MissileID].Fuel = Missiles[MissileID].Fuel - (TimeDifference * Missiles[MissileID].NumOfThrusters * Missiles[MissileID].Thrust);
+					else
+						Missiles[MissileID].Fuel = 0;
+					end
+					Missiles[MissileID].MaxTurnSpeed = 10 * math.sqrt(Missiles[MissileID].Speed) * (Missiles[MissileID].NumOfFins / Missiles[MissileID].MissileLength);
+					Missiles[MissileID].MinimumTurnRadius = 5.73 * math.sqrt(Missiles[MissileID].Speed) * (Missiles[MissileID].MissileLength / Missiles[MissileID].NumOfFins);
+					if Missiles[MissileID].Position.y > 0 then --Above water
+						local VariableThrusterFuelUse = 0;
+						local ShortRangeThrusterFuelUse = 0;
+						if Missiles[MissileID].NumOfThrusters ~= 0 then
+							VariableThrusterFuelUse = (Missiles[MissileID].NumOfThrusters * Missiles[MissileID].Thrust);
+						end
+						if Missiles[MissileID].NumOfShortRangeThrusters ~= 0 then
+							ShortRangeThrusterFuelUse = (Missiles[MissileID].NumOfShortRangeThrusters * 1000);
+						end
+						if (Missiles[MissileID].NumOfThrusters ~= 0) or (Missiles[MissileID].NumOfShortRangeThrusters ~= 0)then
+							Missiles[MissileID].FlightTimeLeft = Missiles[MissileID].Fuel / (VariableThrusterFuelUse + ShortRangeThrusterFuelUse);
+						end
+					else	--Below the water
+						if Missiles[MissileID].NumOfTorpedoPropellers ~= 0 then
+							Missiles[MissileID].FlightTimeLeft = Missiles[MissileID].Fuel / (Missiles[MissileID].NumOfTorpedoPropellers * 37.5);
+						end
+					end
+					if Missiles[MissileID].FlightTimeLeft > Missiles[MissileID].TimeLeftTillDespawn then
+						Missiles[MissileID].FlightTimeLeft = Missiles[MissileID].TimeLeftTillDespawn;
+					end
 					PreviousTimeForMissiles = I:GetTime();
+				else
+					UpdateThrust = false;
 				end
 			
 				ValidMissileList[MissileID] = true;
@@ -371,7 +454,6 @@ function CalculateGroundDistanceToTarget(I, MissileID)
 	return GroundDistanceToTarget;
 end
 
-
 function PredictInterceptPosition(I)
 	for MissileID, Missile in pairs(Missiles) do
 		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
@@ -382,7 +464,7 @@ function PredictInterceptPosition(I)
 				local TargetAcceleration = Targets[Missile.TargetID].Acceleration;
 			
 				local MissilePosition = Missile.Position;
-				local MissileSpeed = Vector3.Magnitude(Missile.Velocity);
+				local MissileSpeed = Missile.Speed;
 				local MissileAcceleration = Missile.Acceleration;
 			
 				local SummedSpeedAcceleration = Vector3.Magnitude(MissileAcceleration + TargetAcceleration);
@@ -390,28 +472,51 @@ function PredictInterceptPosition(I)
 				local IntecpetionRange;
 				local InterceptionTime;
 				local InterceptionAimPos = TargetPosition;
-				for i=0, 12 do
+			
+				for i=0, 12 do					
 					IntecpetionRange = Vector3.Distance(MissilePosition, InterceptionAimPos);
 					if SummedSpeedAcceleration ~= 0 then
 						InterceptionTime = (-SummedSpeed + math.sqrt(math.abs(math.pow(SummedSpeed, 2) + (2 * SummedSpeedAcceleration * IntecpetionRange)))) / SummedSpeedAcceleration;
 					elseif SummedSpeed ~= 0 then
 						InterceptionTime = IntecpetionRange / SummedSpeed;
 					else
-						InterceptionTime = 60;
+						InterceptionTime = Missile.FlightTimeLeft;
 					end
-					--Sanity check IntecpetionTime
-					if InterceptionTime > 60 then
-						InterceptionTime = 60;
+					--Sanity check InterceptionTime
+					if InterceptionTime > Missile.FlightTimeLeft then
+						InterceptionTime = Missile.FlightTimeLeft;
 					end
 					InterceptionAimPos = TargetPosition + (TargetVelocity * InterceptionTime) + (TargetAcceleration * 0.5 * math.pow(InterceptionTime,2));
 				end
-				Missile.IntecpetionTime = InterceptionTime;
+				
+				Missile.InterceptionTime = InterceptionTime;
 				Missile.AimPoint = Vector3(InterceptionAimPos.x,InterceptionAimPos.y,InterceptionAimPos.z);
-
 			end
 		end
 	end
 end
+
+--Check if the missile can actually aim at the correct point fast enough
+function CheckAngleToIntercept(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			if Targets[Missile.TargetID] ~= nil then	--Check we have a target
+				local VectorToInterceptionAimPos = Missile.AimPoint - Missile.Position;--Targets[Missile.TargetID].Position --Missile.AimPoint
+				if (VectorToInterceptionAimPos.magnitude ~= 0) and  (Missile.Speed ~= 0) then
+					Missile.AngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Missile.Velocity) / (VectorToInterceptionAimPos.magnitude *  Missile.Speed)));
+				else
+					Missile.AngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Missile.Velocity) / 0.001));
+				end
+				if ((Missile.AngleToInterceptionAimPos > ((Missile.MaxTurnSpeed * Missile.InterceptionTime) + InterceptionTurnAngleTollerance)) and (Vector3.Distance(Missile.Position, Targets[Missile.TargetID].Position) > 10)) then
+					--Missile can't turn in time, change trajectory
+					Missile.AimPoint = Targets[Missile.TargetID].Position + (Missile.Velocity * 4);	--Purposly aim the missile behind the target so it can try for another pass
+					Missile.AimPoint.y = CruisingAltitude;
+				end
+			end
+		end
+	end
+end
+
 
 --To allow quick change in height, use a closer aimpoint than target, but still in the same direction.
 function TargetCloserThanTarget(I, MissileID, GroundDistanceToTarget)
@@ -606,38 +711,46 @@ end
 function ControlMissileThrust(I)
 	for MissileID, Missile in pairs(Missiles) do
 		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
-			local TargetSpeed = 0;
-			if Targets[Missile.TargetID] ~= nil then	--Check we have a target
-				TargetSpeed = Vector3.Magnitude(Targets[Missile.TargetID].Velocity);
+			if UseFuelDefinedThrustControl == true then
+				if Missile.InterceptionTime ~= 0 then
+					Missile.Thrust = BaseMissileThrust * (Missile.FlightTimeLeft / Missile.InterceptionTime) * (1 - (Missile.AngleToInterceptionAimPos / 180.1));
+				else
+					Missile.Thrust = BaseMissileThrust * (Missile.FlightTimeLeft / 0.001) * (1 - (Missile.AngleToInterceptionAimPos / 180.1));
+				end
 			else
-				TargetSpeed = 0;
-			end
+				local TargetSpeed = 0;
+				if Targets[Missile.TargetID] ~= nil then	--Check we have a target
+					TargetSpeed = Vector3.Magnitude(Targets[Missile.TargetID].Velocity);
+				else
+					TargetSpeed = 0;
+				end
 					
-			local VectorToInterceptionAimPos = Missile.AimPoint - Missile.Position
-			local AngleToInterceptionAimPos;
-			if (VectorToInterceptionAimPos.magnitude ~= 0) and  (Missile.Velocity.magnitude ~= 0) then
-				AngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Missile.Velocity) / (VectorToInterceptionAimPos.magnitude *  Missile.Velocity.magnitude)));
-			else
-				AngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Missile.Velocity) / 0.001));
+				local VectorToInterceptionAimPos = Missile.AimPoint - Missile.Position
+				local AngleToInterceptionAimPos;
+				if (VectorToInterceptionAimPos.magnitude ~= 0) and  (Missile.Velocity.magnitude ~= 0) then
+					AngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Missile.Velocity) / (VectorToInterceptionAimPos.magnitude *  Missile.Velocity.magnitude)));
+				else
+					AngleToInterceptionAimPos = math.deg(math.acos(Vector3.Dot(VectorToInterceptionAimPos,  Missile.Velocity) / 0.001));
+				end
+				Missile.Thrust =  MissileThrustTargetSpeedMultiplier * TargetSpeed * (1 - (AngleToInterceptionAimPos / 180.1)) + BaseMissileThrust;
 			end
-			Missile.Thrust =  MissileThrustTargetSpeedMultiplier * TargetSpeed * (1 - (AngleToInterceptionAimPos / 180.1)) + BaseMissileThrust;
-			if Missile.IntecpetionTime < BoostIntecpetionTime then
+
+			if Missile.InterceptionTime < BoostInterceptionTime then
 				Missile.Thrust = Missile.Thrust * BoostThrustMultiplier;
 			end
+			
 			if Missile.Thrust > 10000 then	--Clamp result
 				Missile.Thrust = 10000;
 			end
+			
 		end
 	end
 end
 
 
---Changes the missile thrust every 100 ticks
+--Changes the missile thrust every time the fuel amount is updated
 function SetMissileThrust(I)
-	if TickCount < 100 then
-		TickCount = TickCount + 1;
-	else
-		TickCount = 0;
+	if UpdateThrust == true then
 		ControlMissileThrust(I);
 		for MissileID, Missile in pairs(Missiles) do
 			if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
@@ -668,6 +781,17 @@ function ProximityDetonation(I)
 	end
 end
 
+function EmptyFuelDetonation(I)
+	for MissileID, Missile in pairs(Missiles) do
+		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
+			if (Missile.Fuel <= 0) and (DetonateMissileUponEmptyFuel == true) and (Missile.TimeSinceLaunch > 1.0) then
+				I:DetonateLuaControlledMissile(Missile.TransceiverIndex, Missile.MissileIndex);
+			end
+		end
+	end
+end
+
+
 
 --Main
 function Update(I)
@@ -688,6 +812,7 @@ function Update(I)
 	
 		--Guide missiles towards thier targets
 		PredictInterceptPosition(I);
+		CheckAngleToIntercept(I);
 		CruiseTowardsTarget(I);	
 		MissileSeaDive(I);
 	end
@@ -695,6 +820,6 @@ function Update(I)
 	AimMissiles(I); --Now aim at target
 	SetMissileThrust(I);
 	ProximityDetonation(I);
+	EmptyFuelDetonation(I);
 	
 end
-
