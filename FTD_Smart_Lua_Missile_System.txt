@@ -1,6 +1,6 @@
 --FTD Smart Missile Guidance System
 --Author: 6dwavenminer
---Version: 2.1.0
+--Version: 2.1.1
 
 
 --User Config Variables
@@ -15,6 +15,7 @@ MissileInterceptor = false;	--Set true if using being used for missile intercept
 TargetDetonationRange = -10; --If the distance between target and missile is below this value, blow up.
 
 --Target acquisition variables
+MultiTarget = true;
 MaxRange = 4000; --Targets above this range from the missile launcher will be ignored.
 MaxTargetHeight = 10000; --Targets above this height will be ignored.
 MinTargetHeight = -20; --Targets below this range will be ignored.
@@ -300,25 +301,35 @@ function GenerateMissileList(I)
 				Missiles[MissileID].Velocity = MissileInfo.Velocity;
 				Missiles[MissileID].Speed = MissileInfo.Velocity.magnitude;
 				local TimeDifference = I:GetTime() - PreviousTimeForMissiles;
-				if TimeDifference > 0.25 then
+				if TimeDifference > 0.3 then
 					UpdateThrust = true;
 					Missiles[MissileID].Acceleration = (Missiles[MissileID].Velocity - Missiles[MissileID].PreviousVelocity) / TimeDifference;
+					
+					local VariableThrusterFuelUse = 0;
+					local ShortRangeThrusterFuelUse = 0;
+					local TorpedoPropellerFuelUse = 0;
+					if Missiles[MissileID].NumOfThrusters ~= 0 then
+						VariableThrusterFuelUse = (Missiles[MissileID].NumOfThrusters * Missiles[MissileID].Thrust);
+					end
+					if Missiles[MissileID].NumOfShortRangeThrusters ~= 0 then
+						ShortRangeThrusterFuelUse = (Missiles[MissileID].NumOfShortRangeThrusters * 1000);
+					end
+					if Missiles[MissileID].NumOfTorpedoPropellers ~= 0 then
+						TorpedoPropellerFuelUse = (Missiles[MissileID].NumOfTorpedoPropellers * 37.5);
+					end
+						
 					if Missiles[MissileID].Fuel > 0 then
-						Missiles[MissileID].Fuel = Missiles[MissileID].Fuel - (TimeDifference * Missiles[MissileID].NumOfThrusters * Missiles[MissileID].Thrust);
+						if Missiles[MissileID].Position.y > 0 then --Above water
+							Missiles[MissileID].Fuel = Missiles[MissileID].Fuel - (TimeDifference * (VariableThrusterFuelUse + ShortRangeThrusterFuelUse));
+						else	--Below the water
+							Missiles[MissileID].Fuel = Missiles[MissileID].Fuel - (TimeDifference * TorpedoPropellerFuelUse);
+						end
 					else
 						Missiles[MissileID].Fuel = 0;
 					end
 					Missiles[MissileID].MaxTurnSpeed = 10 * math.sqrt(Missiles[MissileID].Speed) * (Missiles[MissileID].NumOfFins / Missiles[MissileID].MissileLength);
 					Missiles[MissileID].MinimumTurnRadius = 5.73 * math.sqrt(Missiles[MissileID].Speed) * (Missiles[MissileID].MissileLength / Missiles[MissileID].NumOfFins);
 					if Missiles[MissileID].Position.y > 0 then --Above water
-						local VariableThrusterFuelUse = 0;
-						local ShortRangeThrusterFuelUse = 0;
-						if Missiles[MissileID].NumOfThrusters ~= 0 then
-							VariableThrusterFuelUse = (Missiles[MissileID].NumOfThrusters * Missiles[MissileID].Thrust);
-						end
-						if Missiles[MissileID].NumOfShortRangeThrusters ~= 0 then
-							ShortRangeThrusterFuelUse = (Missiles[MissileID].NumOfShortRangeThrusters * 1000);
-						end
 						if (Missiles[MissileID].NumOfThrusters ~= 0) or (Missiles[MissileID].NumOfShortRangeThrusters ~= 0)then
 							Missiles[MissileID].FlightTimeLeft = Missiles[MissileID].Fuel / (VariableThrusterFuelUse + ShortRangeThrusterFuelUse);
 						end
@@ -411,29 +422,46 @@ function AssignTargetForMissile(I)
 --Generate a incremental list of target IDs
 	local IncrementalListOfTargetIDs = {};
 	local IncrementalIndex = 0;
+	local MaxScore = -65536
 	for ID, Target in pairs(Targets) do
 		if Target ~= nil then	--Check we have a target
-			IncrementalListOfTargetIDs[IncrementalIndex] = ID;
-			IncrementalIndex = IncrementalIndex + 1;
+			if MultiTarget == true then
+				IncrementalListOfTargetIDs[IncrementalIndex] = ID;
+				IncrementalIndex = IncrementalIndex + 1;
+			else
+				--Target enemy with highest score
+				if Target.Score > MaxScore then
+					IncrementalListOfTargetIDs[IncrementalIndex] = ID;
+					MaxScore = Target.Score
+				end
+			end
 		end
 	end
+	
 
 	--Cycle through every missile and assign it a target
 	local MissileNum = 0;
 	local TargetNum = 0;
 	for MissileID, Missile in pairs(Missiles) do
 		if I:GetLuaControlledMissileInfo(Missile.TransceiverIndex, Missile.MissileIndex).Valid == true then	--Double check the missile is still live
-			MissileNum = MissileNum + 1;
-			if MissileNum > Targets[IncrementalListOfTargetIDs[TargetNum]].MissilesPerTarget then
-				if TargetNum < NumOfTargets - 1 then 
-					TargetNum = TargetNum + 1;
-					MissileNum = 0;
+			
+			if MultiTarget == true then
+				MissileNum = MissileNum + 1;
+				if MissileNum > Targets[IncrementalListOfTargetIDs[TargetNum]].MissilesPerTarget then
+					if TargetNum < NumOfTargets - 1 then 
+						TargetNum = TargetNum + 1;
+						MissileNum = 0;
+					end
 				end
+				Missile.TargetID = IncrementalListOfTargetIDs[TargetNum];
+			else
+				--Only target highest scoring enemy
+				Missile.TargetID = IncrementalListOfTargetIDs[TargetNum];
 			end
-			Missile.TargetID = IncrementalListOfTargetIDs[TargetNum];
+			
 		end
 	end
-	IncrementalListOfTargetIDs = nil;-- Causes one missile to divert + weirdness.
+	IncrementalListOfTargetIDs = nil;
 end
 
 
@@ -472,8 +500,8 @@ function PredictInterceptPosition(I)
 				local IntecpetionRange;
 				local InterceptionTime;
 				local InterceptionAimPos = TargetPosition;
-			
-				for i=0, 12 do					
+				
+				for i=0, 12 do
 					IntecpetionRange = Vector3.Distance(MissilePosition, InterceptionAimPos);
 					if SummedSpeedAcceleration ~= 0 then
 						InterceptionTime = (-SummedSpeed + math.sqrt(math.abs(math.pow(SummedSpeed, 2) + (2 * SummedSpeedAcceleration * IntecpetionRange)))) / SummedSpeedAcceleration;
@@ -823,3 +851,4 @@ function Update(I)
 	EmptyFuelDetonation(I);
 	
 end
+
