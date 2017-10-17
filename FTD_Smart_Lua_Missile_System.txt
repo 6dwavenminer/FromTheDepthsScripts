@@ -1,12 +1,15 @@
 --FTD Smart Missile Guidance System
 --Author: 6dwavenminer
---Version: 2.1.1
+--Version: 2.1.2
 
 
 --User Config Variables
 
 --Launcher vehicle variables
 MainFrameID = 0; --Which MainFrame to connect to
+UseWeaponsSlots = false; 
+--If 'true' will use all weapons control blocks using the weapons slot of the variable 'WeaponID'
+--If 'false' will use the weapons control block with the ID of the variable 'WeaponID'
 WeaponID = 0;
 MaxDistanceBetweenLuaTranscieverAndMissileControl = 10; --The maximum distance between a lua transciever and its corrisponding missile control block.
 
@@ -58,6 +61,7 @@ AntiAlliedCollisionAdditionalSafetyRange = 5; --Additional range to border of al
 --End of User Config Variables
 
 --Global Variables
+MissileLauncherPosList = {};
 PreviousTimeForTargets = 0;
 PreviousTimeForMissiles = 0;
 
@@ -73,12 +77,34 @@ NumOfTargets = 0;
 Targets = {};
 
 function GetUseableLuaTranscivers(I)
-	local MissileLauncherPos = I:GetWeaponInfo(WeaponID).GlobalPosition;
+	MissileLauncherPosList = {};
+	for MissileLauncherID, MissileLauncherPos in pairs(MissileLauncherPosList) do
+		MissileLauncherPos[MissileLauncherID] = nil;
+	end
+	if UseWeaponsSlots == true then
+		for i = 0, I:GetWeaponCount()-1 do
+			local WeaponInfo = I:GetWeaponInfo(i);
+			if WeaponInfo.WeaponSlot == WeaponID then
+				MissileLauncherPosList[i] = WeaponInfo.GlobalPosition;
+			end
+		end
+	else
+		local WeaponInfo = I:GetWeaponInfo(WeaponID);
+		MissileLauncherPosList[0] = WeaponInfo.GlobalPosition;
+	end
+
 	local t;
 	local ValidTransceiverList = {};
 	local UseableLuaTransceiverCount = 0;
 	for t = 0, I:GetLuaTransceiverCount()-1 do
-		if Vector3.Distance(MissileLauncherPos,I:GetLuaTransceiverInfo(t).Position) < MaxDistanceBetweenLuaTranscieverAndMissileControl then
+		local MissileLauncher2LuaTransceiverDistance = 64000;
+		for MissileLauncherID, MissileLauncherPos in pairs(MissileLauncherPosList) do
+			local MissileLauncher2LuaTransceiverDistanceBuffer = Vector3.Distance(MissileLauncherPos,I:GetLuaTransceiverInfo(t).Position);
+			if MissileLauncher2LuaTransceiverDistance > MissileLauncher2LuaTransceiverDistanceBuffer then
+				MissileLauncher2LuaTransceiverDistance = MissileLauncher2LuaTransceiverDistanceBuffer;
+			end
+		end
+		if MissileLauncher2LuaTransceiverDistance < MaxDistanceBetweenLuaTranscieverAndMissileControl then
 			UseableLuaTransceiverList[UseableLuaTransceiverCount] = t;
 			ValidTransceiverList[UseableLuaTransceiverCount] = true;
 			UseableLuaTransceiverCount = UseableLuaTransceiverCount + 1;
@@ -95,21 +121,29 @@ end
 
 --Check that the WeaponID corrisponds to a missile launcher
 function WeaponsCheck(I)
-	if I:GetWeaponInfo(WeaponID).Valid == false then
-		I:LogToHud("Invalid WeaponID, change WeaponID in LUA code"); 
-	else
-		if I:GetWeaponInfo(WeaponID).WeaponType == 4 then --Turret check
-			if not I:GetWeaponInfoOnTurretOrSpinner(WeaponID, 0).WeaponType == 5 then --Weapons check, is it a missile launcher?
-				I:LogToHud("Weapon is not missile launcher, change WeaponID in LUA code, note this weapon is on a turret or spinner,further debugging maybe required"); 
-			else
-				GetUseableLuaTranscivers(I);
-			end
+	if UseWeaponsSlots == false then
+		if I:GetWeaponInfo(WeaponID).Valid == false then
+			I:LogToHud("Invalid WeaponID, change WeaponID in LUA code"); 
 		else
-			if not I:GetWeaponInfo(WeaponID).WeaponType == 5 then --Weapons check, is it a missile launcher?
-				I:LogToHud("Weapon is not missile launcher, change WeaponID in LUA code"); 
+			if I:GetWeaponInfo(WeaponID).WeaponType == 4 then --Turret check
+				if not I:GetWeaponInfoOnTurretOrSpinner(WeaponID, 0).WeaponType == 5 then --Weapons check, is it a missile launcher?
+					I:LogToHud("Weapon is not missile launcher, change WeaponID in LUA code, note this weapon is on a turret or spinner,further debugging maybe required"); 
+				else
+					GetUseableLuaTranscivers(I);
+				end
 			else
-				GetUseableLuaTranscivers(I);
+				if not I:GetWeaponInfo(WeaponID).WeaponType == 5 then --Weapons check, is it a missile launcher?
+					I:LogToHud("Weapon is not missile launcher, change WeaponID in LUA code"); 
+				else
+					GetUseableLuaTranscivers(I);
+				end
 			end
+		end
+	else
+		if WeaponID > 5 then
+			I:LogToHud("WeaponsSlots only go upto 5, either change the variable 'WeaponID' or change 'UseWeaponsSlots' to false ");
+		else
+			GetUseableLuaTranscivers(I);
 		end
 	end
 end
@@ -117,13 +151,20 @@ end
 --Creates a list of all targets within range
 function GenerateTargetList(I)
 	local TargetPos;
-	local TargetRange;
 	local n;
 	local ValidTargetList = {};
 	NumOfTargets = 0;
 	for n=0,I:GetNumberOfTargets(MainFrameID)-1 do
 		TargetPos = I:GetTargetInfo(MainFrameID,n).AimPointPosition;
-		TargetRange = Vector3.Distance(I:GetWeaponInfo(WeaponID).GlobalPosition,TargetPos);
+		
+		local TargetRange = 64000;
+		for MissileLauncherID, MissileLauncherPos in pairs(MissileLauncherPosList) do
+			local TargetRangeBuffer = Vector3.Distance(MissileLauncherPos,TargetPos);
+			if TargetRange > TargetRangeBuffer then
+				TargetRange = TargetRangeBuffer;
+			end
+		end
+		
 		if (TargetRange < MaxRange) and (TargetPos.y < MaxTargetHeight) and (TargetPos.y > MinTargetHeight) then
 			local TargetInfo = I:GetTargetInfo(MainFrameID,n);
 			if TargetInfo.Valid == true then
@@ -166,12 +207,20 @@ end
 --Creates a list of all targets within range
 function GenerateTargetListMissileInterceptor(I)
 	local TargetPos;
-	local TargetRange;
 	local n;
 	local ValidTargetList = {};
 	NumOfTargets = 0;
 	for n=0,I:GetNumberOfWarnings(MainFrameID)-1 do
 		TargetPos = I:GetMissileWarning(MainFrameID,n).Position;
+		
+		local TargetRange = 64000;
+		for MissileLauncherID, MissileLauncherPos in pairs(MissileLauncherPosList) do
+			local TargetRangeBuffer = Vector3.Distance(MissileLauncherPos,TargetPos);
+			if TargetRange > TargetRangeBuffer then
+				TargetRange = TargetRangeBuffer;
+			end
+		end
+		
 		TargetRange = Vector3.Distance(I:GetWeaponInfo(WeaponID).GlobalPosition,TargetPos);
 		if (TargetRange < MaxRange) and (TargetPos.y < MaxTargetHeight) and (TargetPos.y > MinTargetHeight) then
 			local TargetInfo = I:GetMissileWarning(MainFrameID,n);
